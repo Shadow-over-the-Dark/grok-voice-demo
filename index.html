@@ -1,1 +1,215 @@
-PLACEHOLDER
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Grok Voice Demo</title>
+<style>
+  :root { color-scheme: light dark; --accent: #0a84ff; --bg: #f2f2f7; --card: #fff; --text: #1c1c1e; --muted: #6e6e73; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #000; --card: #1c1c1e; --text: #f2f2f7; --muted: #98989d; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 17px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; background: var(--bg); color: var(--text);
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width: 640px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 28px; margin: 8px 0 0; }
+  .card { background: var(--card); border-radius: 14px; padding: 16px; display: grid; gap: 12px; }
+  .card h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 14px 16px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.live { background: #ff3b30; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 140px; }
+  textarea, select { font: inherit; width: 100%; border-radius: 10px; border: 1px solid #c7c7cc; padding: 10px; background: transparent; color: inherit; }
+  textarea { min-height: 120px; resize: vertical; }
+  #interim { color: var(--muted); min-height: 1.4em; font-style: italic; }
+  #status { font-size: 15px; color: var(--muted); }
+  #status.err { color: #ff3b30; }
+  label { font-size: 15px; color: var(--muted); display: grid; gap: 6px; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); }
+  .check input { width: 20px; height: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Grok Voice Demo</h1>
+  <p id="status">Prüfe Browser…</p>
+
+  <section class="card" aria-labelledby="h-rec">
+    <h2 id="h-rec">Sprechen → Text</h2>
+    <label>Sprache
+      <select id="lang">
+        <option value="de-DE" selected>Deutsch</option>
+        <option value="en-US">English (US)</option>
+      </select>
+    </label>
+    <button id="mic" type="button">🎤 Zuhören starten</button>
+    <div id="interim" aria-live="polite"></div>
+    <textarea id="transcript" placeholder="Hier erscheint, was du sagst. Du kannst auch selbst tippen."></textarea>
+    <label class="check"><input type="checkbox" id="echo" checked> Erkannten Satz automatisch vorlesen</label>
+    <div class="row">
+      <button id="copy" type="button" class="secondary">Kopieren</button>
+      <button id="clear" type="button" class="secondary">Leeren</button>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="h-tts">
+    <h2 id="h-tts">Text → Sprache</h2>
+    <label>Stimme <select id="voice"></select></label>
+    <label>Tempo <input id="rate" type="range" min="0.5" max="1.5" step="0.1" value="1"></label>
+    <div class="row">
+      <button id="speak" type="button">🔊 Vorlesen</button>
+      <button id="stop" type="button" class="secondary">Stopp</button>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status"), micBtn = $("mic"), interimEl = $("interim"), transcript = $("transcript");
+  const voiceSel = $("voice"), langSel = $("lang");
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const synth = window.speechSynthesis;
+  let rec = null, listening = false, wantListening = false;
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.className = isError ? "err" : "";
+  }
+
+  // ---------- Text to speech ----------
+  function loadVoices() {
+    if (!synth) return;
+    const lang = langSel.value.slice(0, 2);
+    const voices = synth.getVoices().filter(v => v.lang.toLowerCase().startsWith(lang));
+    const all = voices.length ? voices : synth.getVoices();
+    const prev = voiceSel.value;
+    voiceSel.innerHTML = "";
+    all.forEach(v => {
+      const o = document.createElement("option");
+      o.value = v.voiceURI;
+      o.textContent = v.name + " (" + v.lang + ")";
+      voiceSel.appendChild(o);
+    });
+    if (prev && all.some(v => v.voiceURI === prev)) voiceSel.value = prev;
+  }
+
+  function speak(text) {
+    if (!synth || !text.trim()) return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text.trim());
+    const v = synth.getVoices().find(x => x.voiceURI === voiceSel.value);
+    if (v) u.voice = v;
+    u.lang = v ? v.lang : langSel.value;
+    u.rate = parseFloat($("rate").value) || 1;
+    // Pause listening while speaking so the mic does not pick up the voice.
+    const resume = wantListening;
+    if (resume) stopListening(true);
+    u.onend = u.onerror = () => { if (resume) startListening(); };
+    synth.speak(u);
+  }
+
+  // ---------- Speech to text ----------
+  function startListening() {
+    if (!Recognition) return;
+    wantListening = true;
+    rec = new Recognition();
+    rec.lang = langSel.value;
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => {
+      listening = true;
+      micBtn.textContent = "⏹ Zuhören beenden";
+      micBtn.classList.add("live");
+      setStatus("Ich höre zu…");
+    };
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        const text = r[0].transcript;
+        if (r.isFinal) {
+          const clean = text.trim();
+          if (clean) {
+            transcript.value += (transcript.value && !transcript.value.endsWith("\n") ? "\n" : "") + clean;
+            transcript.scrollTop = transcript.scrollHeight;
+            if ($("echo").checked) speak(clean);
+          }
+        } else {
+          interim += text;
+        }
+      }
+      interimEl.textContent = interim;
+    };
+    rec.onerror = (e) => {
+      const msg = {
+        "not-allowed": "Mikrofon nicht erlaubt. In Safari: aA-Menü → Website-Einstellungen → Mikrofon → Erlauben.",
+        "service-not-allowed": "Spracherkennung ist aus. iPhone: Einstellungen → Siri → „Siri & Diktieren“ bzw. Diktieren einschalten.",
+        "no-speech": "Nichts gehört. Tippe nochmal und sprich.",
+        "audio-capture": "Kein Mikrofon gefunden.",
+        "network": "Netzwerkfehler bei der Spracherkennung."
+      }[e.error] || ("Fehler: " + e.error);
+      setStatus(msg, true);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") wantListening = false;
+    };
+    rec.onend = () => {
+      listening = false;
+      interimEl.textContent = "";
+      micBtn.textContent = "🎤 Zuhören starten";
+      micBtn.classList.remove("live");
+      // Safari ends sessions on its own; restart while the user still wants it.
+      if (wantListening && !(synth && synth.speaking)) {
+        try { startListening(); } catch (_) {}
+      } else if (!wantListening && !statusEl.classList.contains("err")) {
+        setStatus("Bereit.");
+      }
+    };
+    try { rec.start(); } catch (err) { setStatus("Start fehlgeschlagen: " + err.message, true); }
+  }
+
+  function stopListening(keepWish) {
+    if (!keepWish) wantListening = false;
+    if (rec) { rec.onend = keepWish ? null : rec.onend; try { rec.stop(); } catch (_) {} }
+    if (keepWish) {
+      listening = false;
+      micBtn.textContent = "🎤 Zuhören starten";
+      micBtn.classList.remove("live");
+      setStatus("Lese vor…");
+    }
+  }
+
+  // ---------- Wiring ----------
+  micBtn.addEventListener("click", () => {
+    if (synth) synth.cancel();
+    (listening || wantListening) ? stopListening(false) : startListening();
+  });
+  $("speak").addEventListener("click", () => {
+    const sel = transcript.value.substring(transcript.selectionStart, transcript.selectionEnd);
+    speak(sel || transcript.value);
+  });
+  $("stop").addEventListener("click", () => synth && synth.cancel());
+  $("clear").addEventListener("click", () => { transcript.value = ""; interimEl.textContent = ""; });
+  $("copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(transcript.value); setStatus("Kopiert."); }
+    catch (_) { transcript.select(); setStatus("Text markiert – jetzt kopieren."); }
+  });
+  langSel.addEventListener("change", () => {
+    loadVoices();
+    if (wantListening) { stopListening(false); startListening(); }
+  });
+
+  // ---------- Feature check ----------
+  const problems = [];
+  if (!window.isSecureContext) problems.push("Seite muss über https laufen (z. B. GitHub Pages), sonst gibt es kein Mikrofon.");
+  if (!Recognition) { problems.push("Spracherkennung fehlt in diesem Browser. Nutze Safari ab iOS 14.5 oder macOS."); micBtn.disabled = true; }
+  if (!synth) { problems.push("Vorlesen wird nicht unterstützt."); $("speak").disabled = true; $("stop").disabled = true; }
+  else { loadVoices(); synth.onvoiceschanged = loadVoices; }
+  setStatus(problems.length ? problems.join(" ") : "Bereit. Tippe auf „Zuhören starten“.", problems.length > 0);
+})();
+</script>
+</body>
+</html>
